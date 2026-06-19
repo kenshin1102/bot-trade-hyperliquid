@@ -1,0 +1,67 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: hl_strategy
+      POSTGRES_USER: bot
+      POSTGRES_PASSWORD: bot
+    ports:
+      - "5434:5432"   # 5432 used by solana bot, 5433 by copy-trade-hl bot
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bot -d hl_strategy"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6381:6379"   # 6379 and 6380 used by other bots
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  hl-backfill:
+    build: .
+    image: hl-strategy-bot
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://bot:bot@postgres:5432/hl_strategy
+      REDIS_URL: redis://redis:6379/0
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: ["python", "-m", "src.data.backfill", "--loop", "--hours", "1"]
+
+  hl-strategy:
+    build: .
+    image: hl-strategy-bot
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://bot:bot@postgres:5432/hl_strategy
+      REDIS_URL: redis://redis:6379/0
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      hl-backfill:
+        condition: service_started
+    command: ["python", "-m", "src.main", "--report-hours", "24"]
+
+volumes:
+  pgdata:

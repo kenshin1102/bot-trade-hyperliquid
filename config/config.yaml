@@ -1,0 +1,36 @@
+data:
+  coins: ["BTC", "ETH", "SOL", "AVAX", "MATIC"]
+  candle_intervals: ["15m", "1h"]
+  backfill_days: 90
+
+regime:
+  no_trade_below: 30.0     # score < 30 → NO_TRADE
+  small_size_below: 50.0   # score < 50 → SMALL (half size)
+  btc_trend_weight: 0.30
+  coin_trend_weight: 0.25
+  volume_weight: 0.20
+  funding_weight: 0.15
+  oi_weight: 0.10
+
+strategy:
+  name: Breakout_V1
+  timeframe: "15m"
+  breakout_lookback_candles: 20
+  volume_zscore_min: 1.5
+  oi_change_min_pct: 0.02     # OI must grow ≥ 2% to confirm breakout
+  funding_max_pct: 0.005      # skip long if funding > 0.5% (overheated)
+  spread_max_bps: 20.0
+
+risk:
+  max_risk_per_trade_pct: 0.25   # risk 0.25% of account per trade
+  sl_atr_multiplier: 1.5
+  tp_rr: 2.0                     # TP = 2× SL distance
+  max_daily_loss_pct: 1.0        # pause new trades if down >1% today
+  max_concurrent_positions: 3
+  emergency_stop: false
+
+execution:
+  mode: paper                    # paper | live
+  account_balance: 10000.0
+  fee_taker_bps: 2.5             # Hyperliquid taker fee
+  slippage_bps: 5.0
