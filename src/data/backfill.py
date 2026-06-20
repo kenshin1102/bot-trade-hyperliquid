@@ -24,31 +24,51 @@ from src.storage.repository import AssetContextRepo, CandleRepo, FundingRateRepo
 logger = logging.getLogger("data.backfill")
 
 
+_INTERVAL_MINUTES: dict[str, int] = {
+    "1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30,
+    "1h": 60, "2h": 120, "4h": 240, "8h": 480, "12h": 720, "1d": 1440,
+}
+_MAX_CANDLES_PER_REQUEST = 5000
+
+
 async def backfill_candles(client: HyperliquidClient, repo: CandleRepo, coins: list[str], intervals: list[str], days: int) -> None:
     now = time.time()
     for coin in coins:
         for interval in intervals:
             try:
-                start_time_ms = int((now - days * 86400) * 1000)
-                raw = await client.get_candles(coin, interval, start_time_ms)
-                rows = [
-                    CandleRow(
-                        id=f"{coin}:{interval}:{c['open_time']}",
-                        coin=coin,
-                        interval=interval,
-                        open_time=c["open_time"],
-                        close_time=c["close_time"],
-                        open=c["open"],
-                        high=c["high"],
-                        low=c["low"],
-                        close=c["close"],
-                        volume=c["volume"],
-                        created_at=int(now),
-                    )
-                    for c in raw
-                ]
-                repo.upsert_many(rows)
-                logger.info("backfill: %s %s → %d candles", coin, interval, len(rows))
+                start_ms = int((now - days * 86400) * 1000)
+                end_ms = int(now * 1000)
+                interval_min = _INTERVAL_MINUTES.get(interval, 60)
+                # Max window per API call to stay within ~5000 candle limit
+                chunk_ms = _MAX_CANDLES_PER_REQUEST * interval_min * 60 * 1000
+
+                all_rows: list[CandleRow] = []
+                chunk_start = start_ms
+                while chunk_start < end_ms:
+                    chunk_end = min(chunk_start + chunk_ms, end_ms)
+                    raw = await client.get_candles(coin, interval, chunk_start, chunk_end)
+                    if raw:
+                        all_rows.extend(
+                            CandleRow(
+                                id=f"{coin}:{interval}:{c['open_time']}",
+                                coin=coin,
+                                interval=interval,
+                                open_time=c["open_time"],
+                                close_time=c["close_time"],
+                                open=c["open"],
+                                high=c["high"],
+                                low=c["low"],
+                                close=c["close"],
+                                volume=c["volume"],
+                                created_at=int(now),
+                            )
+                            for c in raw
+                        )
+                    chunk_start = chunk_end + 1
+                    await asyncio.sleep(0.3)
+
+                repo.upsert_many(all_rows)
+                logger.info("backfill: %s %s → %d candles", coin, interval, len(all_rows))
             except Exception as exc:
                 logger.error("backfill: candles %s %s failed: %s", coin, interval, exc)
             await asyncio.sleep(0.3)
