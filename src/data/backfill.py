@@ -15,6 +15,7 @@ import logging
 import time
 
 from src.config.settings import load_config, load_secrets
+from src.data.coin_selector import CoinSelector
 from src.hyperliquid.client import HyperliquidClient
 from src.monitoring.notifier import TaggedNotifier, build_notifier
 from src.storage.db import AssetContextRow, CandleRow, FundingRateRow, init_db, make_session_factory
@@ -109,10 +110,17 @@ async def run_once(client: HyperliquidClient, session_factory, cfg, notifier) ->
         funding_repo = FundingRateRepo(session)
         ctx_repo = AssetContextRepo(session)
 
-        coins: list[str] = cfg.data.coins
+        selector = CoinSelector(
+            client, redis=None,
+            n=cfg.data.top_coins_n,
+            refresh_days=cfg.data.top_coins_refresh_days,
+            fallback=cfg.data.coins,
+        )
+        coins: list[str] = await selector.get_active_coins()
         intervals: list[str] = cfg.data.candle_intervals
         days: int = cfg.data.backfill_days
 
+        logger.info("backfill: active coins = %s", coins)
         await backfill_candles(client, candle_repo, coins, intervals, days)
         await backfill_funding(client, funding_repo, coins, days)
         await backfill_asset_contexts(client, ctx_repo, coins)

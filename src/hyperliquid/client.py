@@ -250,6 +250,30 @@ class HyperliquidClient:
         await self._redis_set(cache_key, rates, _FUNDING_CACHE_TTL_S)
         return rates
 
+    async def get_top_coins_by_volume(
+        self,
+        n: int = 10,
+        exclude: set[str] | None = None,
+    ) -> list[str]:
+        """Return top N perp coins ranked by 24h notional volume."""
+        _STABLECOINS = {"USDC", "USDT", "DAI", "BUSD", "TUSD", "USDE", "FDUSD"}
+        excluded = (exclude or set()) | _STABLECOINS
+
+        data = await self._post({"type": "metaAndAssetCtxs"})
+        if not data or len(data) < 2:
+            return []
+
+        universe: list[dict] = data[0].get("universe", [])
+        asset_ctxs: list[dict] = data[1]
+
+        pairs = [
+            (coin_meta.get("name", ""), float(ctx.get("dayNtlVlm", 0) or 0))
+            for coin_meta, ctx in zip(universe, asset_ctxs)
+            if coin_meta.get("name", "") not in excluded
+        ]
+        pairs.sort(key=lambda x: x[1], reverse=True)
+        return [name for name, _ in pairs[:n]]
+
     async def get_asset_contexts(self) -> list[dict]:
         """Fetch current OI and mark price for all coins (no cache)."""
         data = await self._post({"type": "metaAndAssetCtxs"})

@@ -10,6 +10,8 @@ class DataConfig:
     coins: list = field(default_factory=lambda: ["BTC", "ETH", "SOL"])
     candle_intervals: list = field(default_factory=lambda: ["15m", "1h"])
     backfill_days: int = 90
+    top_coins_n: int = 10
+    top_coins_refresh_days: int = 7
 
 
 @dataclass

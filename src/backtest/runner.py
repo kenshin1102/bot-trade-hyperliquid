@@ -30,6 +30,7 @@ logging.basicConfig(level=logging.WARNING, format="%(message)s")
 logger = logging.getLogger("backtest")
 
 _MIN_CANDLES = 55   # EMA50 (50) + ATR (14) warmup, cộng thêm buffer
+_MAX_FUNDING_WINDOW = 90  # funding rows used for percentile calc
 
 
 # ── data structures ────────────────────────────────────────────────────────────
@@ -68,6 +69,54 @@ class BtResult:
     initial_equity: float = 10000.0
 
 
+@dataclass
+class CandleCache:
+    """Pre-loaded candle + funding data for one timeframe, reusable across scenarios."""
+    candles: dict[str, list[CandleRow]]
+    funding: dict[str, list[FundingRateRow]]
+    candle_ts: dict[str, list[int]]   # close_time arrays for bisect
+    funding_ts: dict[str, list[int]]  # funding_time arrays for bisect
+
+
+_HTF_EMA_FAST = 20
+_HTF_EMA_SLOW = 50
+
+
+def _htf_trend_ok(
+    side: str,
+    coin: str,
+    ts: int,
+    htf_caches: dict[str, CandleCache],
+    tfs: list[str],
+) -> bool:
+    """Return True if every requested HTF EMA trend agrees with `side`.
+
+    Bullish  = EMA20 > EMA50 on that timeframe → allow LONG
+    Bearish  = EMA20 < EMA50                   → allow SHORT
+    Missing data → don't block (return True).
+    """
+    for tf in tfs:
+        cache = htf_caches.get(tf)
+        if cache is None:
+            continue
+        ts_arr = cache.candle_ts.get(coin, [])
+        if not ts_arr:
+            continue
+        idx = bisect.bisect_right(ts_arr, ts) - 1
+        if idx < _HTF_EMA_SLOW - 1:
+            continue  # not enough history yet
+        window = cache.candles[coin][idx - _HTF_EMA_SLOW + 1: idx + 1]
+        closes = [c.close for c in window]
+        ema_fast = _ema(closes[-_HTF_EMA_FAST:], _HTF_EMA_FAST)
+        ema_slow = _ema(closes, _HTF_EMA_SLOW)
+        htf_bull = ema_fast > ema_slow
+        if side == "LONG" and not htf_bull:
+            return False
+        if side == "SHORT" and htf_bull:
+            return False
+    return True
+
+
 # ── feature computation (standalone, no DB calls) ─────────────────────────────
 
 def _compute_features(
@@ -91,7 +140,7 @@ def _compute_features(
 
     funding_rate = funding_rows[-1].rate if funding_rows else 0.0
     if len(funding_rows) >= 2:
-        rates = [r.rate for r in funding_rows[-90:]]
+        rates = [r.rate for r in funding_rows]
         funding_percentile = sum(1 for r in rates if r < funding_rate) / len(rates)
     else:
         funding_percentile = 0.5
@@ -143,6 +192,45 @@ def _close(pos: BtTrade, exit_price: float, exit_time: int, reason: str, fee_bps
     pos.pnl_usd = gross - pos.fee_open - fee_close
 
 
+# ── data loader (call once, reuse across scenarios) ───────────────────────────
+
+def load_candle_cache(
+    session_factory,
+    coins: list[str],
+    timeframe: str,
+    days: int,
+) -> CandleCache:
+    """Load all candles + funding from DB once and return a reusable cache."""
+    since_ts = int(time.time()) - days * 86400
+    all_candles: dict[str, list[CandleRow]] = {}
+    all_funding: dict[str, list[FundingRateRow]] = {}
+    all_coins = list(dict.fromkeys(["BTC"] + coins))
+
+    s = session_factory()
+    try:
+        for coin in all_coins:
+            all_candles[coin] = (
+                s.query(CandleRow)
+                .filter(CandleRow.coin == coin, CandleRow.interval == timeframe,
+                        CandleRow.open_time >= since_ts)
+                .order_by(CandleRow.open_time)
+                .all()
+            )
+            all_funding[coin] = (
+                s.query(FundingRateRow)
+                .filter(FundingRateRow.coin == coin, FundingRateRow.funding_time >= since_ts)
+                .order_by(FundingRateRow.funding_time)
+                .all()
+            )
+    finally:
+        s.close()
+
+    candle_ts = {coin: [c.close_time for c in rows] for coin, rows in all_candles.items()}
+    funding_ts = {coin: [f.funding_time for f in rows] for coin, rows in all_funding.items()}
+    return CandleCache(candles=all_candles, funding=all_funding,
+                       candle_ts=candle_ts, funding_ts=funding_ts)
+
+
 # ── main runner ───────────────────────────────────────────────────────────────
 
 def run(
@@ -151,8 +239,22 @@ def run(
     timeframe: str,
     days: int,
     cfg,
+    *,
+    cache: CandleCache | None = None,
+    htf_caches: dict[str, CandleCache] | None = None,
+    htf_filter: list[str] | None = None,
 ) -> BtResult:
-    since_ts = int(time.time()) - days * 86400
+    if cache is None:
+        cache = load_candle_cache(session_factory, coins, timeframe, days)
+
+    _htf_caches: dict[str, CandleCache] = htf_caches or {}
+    _htf_filter: list[str] = htf_filter or []
+
+    all_candles = cache.candles
+    all_funding = cache.funding
+    candle_ts = cache.candle_ts
+    funding_ts = cache.funding_ts
+
     result = BtResult(initial_equity=cfg.execution.account_balance)
     equity = cfg.execution.account_balance
 
@@ -162,41 +264,7 @@ def run(
 
     regime_det = RegimeDetector(cfg.regime)
     strategy = BreakoutV1(cfg.strategy, cfg.risk, regime_det)
-
-    # Load all data from DB once
-    s = session_factory()
-    try:
-        all_candles: dict[str, list[CandleRow]] = {}
-        all_funding: dict[str, list[FundingRateRow]] = {}
-        all_coins = list(dict.fromkeys(["BTC"] + coins))  # BTC first for regime
-
-        for coin in all_coins:
-            rows = (
-                s.query(CandleRow)
-                .filter(CandleRow.coin == coin, CandleRow.interval == timeframe,
-                        CandleRow.open_time >= since_ts)
-                .order_by(CandleRow.open_time)
-                .all()
-            )
-            all_candles[coin] = rows
-
-            frows = (
-                s.query(FundingRateRow)
-                .filter(FundingRateRow.coin == coin, FundingRateRow.funding_time >= since_ts)
-                .order_by(FundingRateRow.funding_time)
-                .all()
-            )
-            all_funding[coin] = frows
-    finally:
-        s.close()
-
-    # Pre-build sorted timestamp arrays for bisect lookups
-    candle_ts: dict[str, list[int]] = {
-        coin: [c.close_time for c in rows] for coin, rows in all_candles.items()
-    }
-    funding_ts: dict[str, list[int]] = {
-        coin: [f.funding_time for f in rows] for coin, rows in all_funding.items()
-    }
+    breakout_window = cfg.strategy.breakout_lookback_candles + 2  # candles needed by strategy
 
     # Drive the loop off BTC candle timestamps
     btc_candles = all_candles.get("BTC", [])
@@ -205,7 +273,7 @@ def run(
         cfg.strategy.oi_change_min_pct = orig_oi_min
         return result
 
-    open_pos: dict[str, BtTrade] = {}   # coin → open trade
+    open_pos: dict[str, BtTrade] = {}
     realized_pnl = 0.0
     today_start = 0
     daily_pnl = 0.0
@@ -220,7 +288,7 @@ def run(
             today_start = day_bucket
             daily_pnl = 0.0
 
-        # 1. Check SL/TP on all open positions using THIS candle's high/low
+        # 1. Check SL/TP on all open positions
         for coin in list(open_pos):
             pos = open_pos[coin]
             idx = bisect.bisect_right(candle_ts.get(coin, []), ts) - 1
@@ -228,7 +296,7 @@ def run(
                 continue
             coin_c = all_candles[coin][idx]
             if coin_c.close_time != ts:
-                continue  # candle for this coin at this timestamp not available
+                continue
             hit = _check_exit(pos, coin_c)
             if hit:
                 reason, exit_price = hit
@@ -239,7 +307,7 @@ def run(
                 result.trades.append(pos)
                 del open_pos[coin]
 
-        # 2. Equity snapshot
+        # 2. Equity snapshot (realized + unrealized)
         unrealized = 0.0
         for coin, pos in open_pos.items():
             idx = bisect.bisect_right(candle_ts.get(coin, []), ts) - 1
@@ -251,10 +319,10 @@ def run(
                     unrealized += pos.size_notional * (pos.entry_price - price) / pos.entry_price
         result.equity_curve.append((ts, equity + unrealized))
 
-        # 3. Evaluate signals for each coin
+        # 3. Evaluate signals
         max_daily_loss = cfg.execution.account_balance * cfg.risk.max_daily_loss_pct / 100
         if daily_pnl < -max_daily_loss:
-            continue  # daily loss gate
+            continue
 
         for coin in coins:
             if coin in open_pos:
@@ -262,33 +330,40 @@ def run(
             if len(open_pos) >= cfg.risk.max_concurrent_positions:
                 break
 
-            # Candles up to (and including) current timestamp
             end = bisect.bisect_right(candle_ts.get(coin, []), ts)
-            candles_so_far = all_candles[coin][:end]
+            if end < _MIN_CANDLES:
+                continue
+
+            # Fixed-size windows — O(1) slice, no O(n) copies
+            feat_candles = all_candles[coin][end - _MIN_CANDLES:end]
+            strat_candles = all_candles[coin][max(0, end - breakout_window):end]
 
             end_f = bisect.bisect_right(funding_ts.get(coin, []), ts)
-            funding_so_far = all_funding[coin][:end_f]
+            fund_window = all_funding[coin][max(0, end_f - _MAX_FUNDING_WINDOW):end_f]
 
-            features = _compute_features(coin, timeframe, candles_so_far, funding_so_far)
+            features = _compute_features(coin, timeframe, feat_candles, fund_window)
             if features is None:
                 continue
 
             # BTC features for regime
             end_b = bisect.bisect_right(candle_ts.get("BTC", []), ts)
-            btc_candles_so_far = all_candles["BTC"][:end_b]
+            btc_feat_candles = all_candles["BTC"][end_b - _MIN_CANDLES:end_b] if end_b >= _MIN_CANDLES else []
             end_bf = bisect.bisect_right(funding_ts.get("BTC", []), ts)
-            btc_f_so_far = all_funding["BTC"][:end_bf]
+            btc_fund_window = all_funding["BTC"][max(0, end_bf - _MAX_FUNDING_WINDOW):end_bf]
             btc_features = (
-                _compute_features("BTC", timeframe, btc_candles_so_far, btc_f_so_far)
+                _compute_features("BTC", timeframe, btc_feat_candles, btc_fund_window)
                 if coin != "BTC" else None
             )
 
-            current_price = candles_so_far[-1].close
-            signal = strategy.evaluate(coin, features, btc_features, candles_so_far, current_price, 5.0)
+            current_price = feat_candles[-1].close
+            signal = strategy.evaluate(coin, features, btc_features, strat_candles, current_price, 5.0)
             if signal is None:
                 continue
 
-            # Fill: entry price with slippage + fee
+            # Higher-timeframe trend filter
+            if _htf_filter and not _htf_trend_ok(signal.side, coin, ts, _htf_caches, _htf_filter):
+                continue
+
             adj = (cfg.execution.slippage_bps + cfg.execution.fee_taker_bps) / 10000
             fill = current_price * (1 + adj) if signal.side == "LONG" else current_price * (1 - adj)
 
@@ -343,7 +418,6 @@ def print_report(result: BtResult, coins: list[str], days: int, timeframe: str) 
         print("  No trades.\n")
         return
 
-    # Trade table
     hdr = f"{'#':>3}  {'Coin':<6} {'Side':>5}  {'Entry':>12}  {'Exit':>12}  {'PnL($)':>9}  {'PnL%':>7}  {'Hold':>6}  Exit"
     print(hdr)
     print("─" * len(hdr))
@@ -354,7 +428,6 @@ def print_report(result: BtResult, coins: list[str], days: int, timeframe: str) 
         print(f"{n:>3}  {t.coin:<6} {t.side:>5}  {_fmt_ts(t.entry_time):>12}  {_fmt_ts(t.exit_time):>12}  "
               f"{pnl_s:>9}  {pnl_p:>7}  {hold:>6}  {t.exit_reason}")
 
-    # Summary
     wins = [t for t in closed if t.pnl_usd > 0]
     losses = [t for t in closed if t.pnl_usd <= 0]
     total_pnl = sum(t.pnl_usd for t in closed)
@@ -371,9 +444,8 @@ def print_report(result: BtResult, coins: list[str], days: int, timeframe: str) 
     for t in closed:
         exit_counts[t.exit_reason] = exit_counts.get(t.exit_reason, 0) + 1
 
-    # Max drawdown from equity curve
-    max_dd = 0.0
     peak = result.initial_equity
+    max_dd = 0.0
     for _, eq in result.equity_curve:
         if eq > peak:
             peak = eq
@@ -400,9 +472,9 @@ def print_report(result: BtResult, coins: list[str], days: int, timeframe: str) 
 
 def main() -> None:
     p = argparse.ArgumentParser(prog="python -m src.backtest.runner")
-    p.add_argument("--coins", nargs="+", default=None, help="Coins to test (default: from config)")
-    p.add_argument("--days", type=int, default=60, help="Days of history (default: 60)")
-    p.add_argument("--timeframe", default=None, help="Candle timeframe (default: from config)")
+    p.add_argument("--coins", nargs="+", default=None)
+    p.add_argument("--days", type=int, default=60)
+    p.add_argument("--timeframe", default=None)
     args = p.parse_args()
 
     cfg = load_config()
@@ -414,9 +486,14 @@ def main() -> None:
     init_db(secrets.database_url)
     sf = make_session_factory(secrets.database_url)
 
+    print(f"Loading data from DB ({timeframe}, {args.days}d) ...")
+    t0 = time.time()
+    cache = load_candle_cache(sf, coins, timeframe, args.days)
+    print(f"Data loaded in {time.time()-t0:.1f}s")
+
     print(f"Running backtest: {coins} | {timeframe} | {args.days}d ...")
     t0 = time.time()
-    result = run(sf, coins, timeframe, args.days, cfg)
+    result = run(sf, coins, timeframe, args.days, cfg, cache=cache)
     elapsed = time.time() - t0
     print(f"Done in {elapsed:.1f}s")
 

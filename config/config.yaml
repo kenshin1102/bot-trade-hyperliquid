@@ -1,7 +1,9 @@
 data:
-  coins: ["BTC", "ETH", "SOL", "AVAX", "MATIC"]
-  candle_intervals: ["15m", "1h"]
-  backfill_days: 90
+  coins: ["BTC", "ETH", "SOL", "WIF", "HYPE"]  # fallback nếu API fail
+  candle_intervals: ["15m", "1h", "4h", "1d"]
+  backfill_days: 180
+  top_coins_n: 10
+  top_coins_refresh_days: 7
 
 regime:
   no_trade_below: 30.0     # score < 30 → NO_TRADE

@@ -17,7 +17,9 @@ import time
 from pathlib import Path
 
 from src.config.settings import load_config, load_secrets
+from src.data.coin_selector import CoinSelector
 from src.execution.paper import PaperEngine
+from src.hyperliquid.client import HyperliquidClient
 from src.hyperliquid.ws_client import MarketWSClient
 from src.monitoring.log_setup import setup as setup_log
 from src.monitoring.notifier import TaggedNotifier, build_notifier
@@ -69,6 +71,17 @@ async def run(report_hours: float = 24.0) -> None:
     regime_detector = RegimeDetector(cfg.regime)
     strategy = BreakoutV1(cfg.strategy, cfg.risk, regime_detector)
     paper = PaperEngine(cfg.risk, cfg.execution, notifier, sf)
+
+    # Resolve active coins from Hyperliquid top-volume list
+    async with HyperliquidClient(redis_url=secrets.redis_url) as _tmp_client:
+        selector = CoinSelector(
+            _tmp_client,
+            n=cfg.data.top_coins_n,
+            refresh_days=cfg.data.top_coins_refresh_days,
+            fallback=cfg.data.coins,
+        )
+        active_coins = await selector.get_active_coins()
+    logger.info("Active coins: %s", active_coins)
 
     # WS
     ws = MarketWSClient(reconnect_delay_s=5)
@@ -135,7 +148,7 @@ async def run(report_hours: float = 24.0) -> None:
         await paper.on_signal(signal, signal_id)
 
     # Subscribe market data
-    for coin in cfg.data.coins:
+    for coin in active_coins:
         ws.subscribe_candle(coin, cfg.strategy.timeframe, on_candle)
         ws.subscribe_candle(coin, "1h", on_candle)  # 1h for regime trend
 
@@ -155,9 +168,9 @@ async def run(report_hours: float = 24.0) -> None:
                 except Exception as exc:
                     logger.warning("daily report failed: %s", exc)
 
-    n = len(cfg.data.coins)
+    n = len(active_coins)
     logger.info("Starting strategy bot | %d coins | mode=%s", n, cfg.execution.mode)
-    await notifier.send("info", f"🤖 Strategy bot started | {n} coins | {cfg.execution.mode}")
+    await notifier.send("info", f"🤖 Strategy bot started | {n} coins: {', '.join(active_coins)} | {cfg.execution.mode}")
 
     report_task = asyncio.create_task(daily_report_loop()) if report_hours > 0 else None
     try:
