@@ -86,7 +86,7 @@ def _from_dict(cls, data: dict):
 
 
 def load_config(path: str | None = None) -> Config:
-    p = Path(path or "config.yaml")
+    p = Path(path or "config/config.yaml")
     if not p.exists():
         return Config()
     raw = yaml.safe_load(p.read_text()) or {}

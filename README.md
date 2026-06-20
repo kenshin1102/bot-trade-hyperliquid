@@ -120,12 +120,12 @@ ssh toannx@35.239.129.132 \
   "cd ~/bot-trade-hyperliquid && sudo docker compose build && sudo docker compose up -d"
 ```
 
-### Chỉ đổi `.env` hoặc `config.yaml` (không rebuild)
+### Chỉ đổi `.env` hoặc `config/config.yaml` (không rebuild)
 
 ```bash
 scp .env toannx@35.239.129.132:~/bot-trade-hyperliquid/.env
 # hoặc
-scp config.yaml toannx@35.239.129.132:~/bot-trade-hyperliquid/config.yaml
+scp config/config.yaml toannx@35.239.129.132:~/bot-trade-hyperliquid/config/config.yaml
 
 ssh toannx@35.239.129.132 \
   "cd ~/bot-trade-hyperliquid && sudo docker compose up -d"
