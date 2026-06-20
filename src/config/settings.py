@@ -39,6 +39,9 @@ class StrategyConfig:
     atr_expansion_min: float = 0.0    # 0 = disabled; require current ATR > mean_ATR × N
     min_vol_24h_usd: float = 0.0      # 0 = disabled; skip signal if coin 24h vol < N USD
     breakout_confirm_bars: int = 1    # 1 = enter on breakout bar; 2 = require next bar also closes beyond range
+    # V2 retest/pullback params
+    v2_max_bars_to_retest: int = 10   # scan up to N bars after breakout for a retest
+    v2_retest_tol_atr: float = 0.5    # retest zone = level ± ATR × this
 
 
 @dataclass

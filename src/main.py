@@ -27,6 +27,7 @@ from src.signal.daily_report import send_daily_report
 from src.storage.db import CandleRow, init_db, make_session_factory
 from src.storage.repository import CandleRepo
 from src.strategy.breakout import BreakoutV1
+from src.strategy.breakout_v2 import BreakoutV2
 from src.strategy.feature_engine import FeatureEngine
 from src.strategy.regime import RegimeDetector
 
@@ -69,7 +70,10 @@ async def run(report_hours: float = 24.0) -> None:
     # Strategy components
     feature_engine = FeatureEngine(sf)
     regime_detector = RegimeDetector(cfg.regime)
-    strategy = BreakoutV1(cfg.strategy, cfg.risk, regime_detector)
+    if cfg.strategy.name == "Breakout_V2":
+        strategy = BreakoutV2(cfg.strategy, cfg.risk, regime_detector)
+    else:
+        strategy = BreakoutV1(cfg.strategy, cfg.risk, regime_detector)
     paper = PaperEngine(cfg.risk, cfg.execution, notifier, sf)
 
     # Resolve active coins from Hyperliquid top-volume list
@@ -155,7 +159,7 @@ async def run(report_hours: float = 24.0) -> None:
         if signal is None:
             return
 
-        signal_id = f"Breakout_V1:{coin}:{int(time.time())}"
+        signal_id = f"{cfg.strategy.name}:{coin}:{int(time.time())}"
         await paper.on_signal(signal, signal_id)
 
     # Subscribe market data

@@ -27,6 +27,9 @@ strategy:
   atr_expansion_min: 0.0     # 0 = disabled
   min_vol_24h_usd: 10000000  # skip signal if coin 24h vol < $10M
   breakout_confirm_bars: 1   # 1 = enter on breakout bar; 2 = require next bar confirms
+  # V2 retest params (only used when name: Breakout_V2)
+  v2_max_bars_to_retest: 10
+  v2_retest_tol_atr: 0.5
 
 risk:
   max_risk_per_trade_pct: 0.25   # risk 0.25% of account per trade

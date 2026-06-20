@@ -41,6 +41,9 @@ class Scenario:
     atr_expansion_min: float = 0.0
     min_vol_24h_usd: float = 0.0
     confirm_bars: int = 1
+    strategy_name: str = "Breakout_V1"
+    v2_max_bars_to_retest: int = 10
+    v2_retest_tol_atr: float = 0.5
 
 
 # ── base scenario definitions ──────────────────────────────────────────────────
@@ -64,6 +67,45 @@ _BASE_PARAMS = [
     ("S11-4h-filter",   "4h",  2.0,  30, 2.5, 1.5, 2),
     ("S12-4h-highconv", "4h",  2.5,  40, 3.0, 1.5, 1),
 ]
+
+_V2_BASE_PARAMS = [
+    # (name,               tf,   vol_z, lb, rr,  sl,  pos, bars, tol)
+    ("S20-v2-1h-base",    "1h", 1.5,  20, 2.0, 1.5,  2,  10, 0.5),
+    ("S21-v2-1h-filter",  "1h", 2.0,  30, 2.5, 1.5,  2,  10, 0.5),
+    ("S22-v2-1h-tight",   "1h", 2.0,  30, 2.5, 1.5,  2,   5, 0.3),
+    ("S23-v2-1h-wide",    "1h", 2.0,  30, 2.5, 1.5,  2,  15, 0.75),
+    ("S24-v2-4h-base",    "4h", 1.5,  20, 2.0, 1.5,  2,  10, 0.5),
+    ("S25-v2-4h-filter",  "4h", 2.0,  30, 2.5, 1.5,  2,  10, 0.5),
+]
+
+
+def _build_v2_scenarios(htf_mode: str) -> list[Scenario]:
+    result = []
+    for (base, tf, vol_z, lb, rr, sl, pos, bars, tol) in _V2_BASE_PARAMS:
+        if htf_mode == "none":
+            variants: list[tuple[str, list[str]]] = [("", [])]
+        elif htf_mode == "match":
+            htf = _TF_HTF_MATCH.get(tf, [])
+            suffix = "-" + "".join(htf) if htf else ""
+            variants = [(suffix, htf)]
+        else:
+            variants = _TF_HTF_ALL.get(tf, [("", [])])
+        for (suffix, htf) in variants:
+            result.append(Scenario(
+                name=base + suffix,
+                timeframe=tf,
+                vol_z=vol_z,
+                lookback=lb,
+                tp_rr=rr,
+                sl_mult=sl,
+                max_pos=pos,
+                htf_filter=htf,
+                strategy_name="Breakout_V2",
+                v2_max_bars_to_retest=bars,
+                v2_retest_tol_atr=tol,
+            ))
+    return result
+
 
 _TF_HTF_MATCH: dict[str, list[str]] = {
     "15m": ["1h"],
@@ -158,12 +200,16 @@ def _expand_grid(
                                     atr_expansion_min=ae,
                                     min_vol_24h_usd=mv,
                                     confirm_bars=cb,
+                                    strategy_name=sc.strategy_name,
+                                    v2_max_bars_to_retest=sc.v2_max_bars_to_retest,
+                                    v2_retest_tol_atr=sc.v2_retest_tol_atr,
                                 ))
     return result
 
 
 def _apply(base_cfg, sc: Scenario):
     cfg = copy.deepcopy(base_cfg)
+    cfg.strategy.name = sc.strategy_name
     cfg.strategy.timeframe = sc.timeframe
     cfg.strategy.volume_zscore_min = sc.vol_z
     cfg.strategy.breakout_lookback_candles = sc.lookback
@@ -171,6 +217,8 @@ def _apply(base_cfg, sc: Scenario):
     cfg.strategy.atr_expansion_min = sc.atr_expansion_min
     cfg.strategy.min_vol_24h_usd = sc.min_vol_24h_usd
     cfg.strategy.breakout_confirm_bars = sc.confirm_bars
+    cfg.strategy.v2_max_bars_to_retest = sc.v2_max_bars_to_retest
+    cfg.strategy.v2_retest_tol_atr = sc.v2_retest_tol_atr
     cfg.risk.tp_rr = sc.tp_rr
     cfg.risk.sl_atr_multiplier = sc.sl_mult
     cfg.risk.max_concurrent_positions = sc.max_pos
@@ -302,6 +350,8 @@ def main() -> None:
                    help="Grid: min 24h dollar volume per coin (e.g. 0 10e6 50e6 100e6)")
     p.add_argument("--grid-confirm", nargs="+", type=int, default=None, metavar="N",
                    help="Grid: breakout confirmation bars (1=immediate, 2=next-bar confirm)")
+    p.add_argument("--v2", action="store_true",
+                   help="Include V2 retest/pullback scenarios (S20-S25)")
     args = p.parse_args()
 
     base_cfg = load_config()
@@ -309,6 +359,8 @@ def main() -> None:
     coins = args.coins or base_cfg.data.coins
 
     scenarios = _build_scenarios(args.htf)
+    if args.v2:
+        scenarios = _build_v2_scenarios(args.htf)
     if args.names:
         scenarios = [s for s in scenarios if any(n in s.name for n in args.names)]
         if not scenarios:

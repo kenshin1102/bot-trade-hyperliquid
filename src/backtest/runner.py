@@ -23,6 +23,7 @@ from statistics import mean, stdev
 from src.config.settings import load_config, load_secrets
 from src.storage.db import CandleRow, FundingRateRow, init_db, make_session_factory
 from src.strategy.breakout import BreakoutV1
+from src.strategy.breakout_v2 import BreakoutV2
 from src.strategy.feature_engine import Features, _atr, _ema
 from src.strategy.regime import RegimeDetector
 
@@ -295,8 +296,12 @@ def run(
     cfg.strategy.oi_change_min_pct = 0.0
 
     regime_det = RegimeDetector(cfg.regime)
-    strategy = BreakoutV1(cfg.strategy, cfg.risk, regime_det)
-    breakout_window = cfg.strategy.breakout_lookback_candles + 2  # candles needed by strategy
+    if cfg.strategy.name == "Breakout_V2":
+        strategy = BreakoutV2(cfg.strategy, cfg.risk, regime_det)
+        breakout_window = cfg.strategy.breakout_lookback_candles + cfg.strategy.v2_max_bars_to_retest + 2
+    else:
+        strategy = BreakoutV1(cfg.strategy, cfg.risk, regime_det)
+        breakout_window = cfg.strategy.breakout_lookback_candles + 2
 
     # Drive the loop off BTC candle timestamps
     btc_candles = all_candles.get("BTC", [])
