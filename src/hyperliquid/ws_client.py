@@ -162,6 +162,8 @@ class MarketWSClient:
             interval: str = data.get("i", "")
             cb = self._candle_subs.get((coin, interval))
             if cb is not None:
+                # HL WS does not send "x" (closed flag); closure detected via open_time
+                # transition in the subscriber callback.
                 candle = {
                     "open_time": int(data["t"]) // 1000,
                     "close_time": int(data["T"]) // 1000,
@@ -170,7 +172,7 @@ class MarketWSClient:
                     "low": float(data["l"]),
                     "close": float(data["c"]),
                     "volume": float(data["v"]),
-                    "is_closed": bool(data.get("x", False)),
+                    "num_trades": int(data.get("n", 0)),
                 }
                 await cb(coin, interval, candle)
             else:

@@ -108,6 +108,15 @@ class EquitySnapshotRow(Base):
     open_positions: Mapped[int] = mapped_column(Integer)
 
 
+class UniverseSnapshotRow(Base):
+    __tablename__ = "universe_snapshots"
+    id: Mapped[str] = mapped_column(String, primary_key=True)   # f"{snapshot_time}:{coin}"
+    snapshot_time: Mapped[int] = mapped_column(Integer, index=True)  # floored to hour
+    coin: Mapped[str] = mapped_column(String, index=True)
+    rank: Mapped[int] = mapped_column(Integer)
+    volume_24h_usd: Mapped[float] = mapped_column(Float)
+
+
 def make_engine(database_url: str):
     return create_engine(database_url)
 

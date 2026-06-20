@@ -12,6 +12,7 @@ class DataConfig:
     backfill_days: int = 90
     top_coins_n: int = 10
     top_coins_refresh_days: int = 7
+    backfill_pool_n: int = 30
 
 
 @dataclass
@@ -34,6 +35,10 @@ class StrategyConfig:
     oi_change_min_pct: float = 0.02
     funding_max_pct: float = 0.005
     spread_max_bps: float = 20.0
+    ema_spread_min_pct: float = 0.0   # 0 = disabled; require |EMA20-EMA50|/EMA50 > N%
+    atr_expansion_min: float = 0.0    # 0 = disabled; require current ATR > mean_ATR × N
+    min_vol_24h_usd: float = 0.0      # 0 = disabled; skip signal if coin 24h vol < N USD
+    breakout_confirm_bars: int = 1    # 1 = enter on breakout bar; 2 = require next bar also closes beyond range
 
 
 @dataclass

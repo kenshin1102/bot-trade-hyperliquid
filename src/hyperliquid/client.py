@@ -250,14 +250,15 @@ class HyperliquidClient:
         await self._redis_set(cache_key, rates, _FUNDING_CACHE_TTL_S)
         return rates
 
+    _STABLECOINS = {"USDC", "USDT", "DAI", "BUSD", "TUSD", "USDE", "FDUSD"}
+
     async def get_top_coins_by_volume(
         self,
         n: int = 10,
         exclude: set[str] | None = None,
     ) -> list[str]:
         """Return top N perp coins ranked by 24h notional volume."""
-        _STABLECOINS = {"USDC", "USDT", "DAI", "BUSD", "TUSD", "USDE", "FDUSD"}
-        excluded = (exclude or set()) | _STABLECOINS
+        excluded = (exclude or set()) | self._STABLECOINS
 
         data = await self._post({"type": "metaAndAssetCtxs"})
         if not data or len(data) < 2:
@@ -273,6 +274,23 @@ class HyperliquidClient:
         ]
         pairs.sort(key=lambda x: x[1], reverse=True)
         return [name for name, _ in pairs[:n]]
+
+    async def get_ranked_coins_by_volume(self, top_n: int = 30) -> list[tuple[str, int, float]]:
+        """Return top_n perp coins as (coin, rank, volume_24h_usd), rank starting at 1."""
+        data = await self._post({"type": "metaAndAssetCtxs"})
+        if not data or len(data) < 2:
+            return []
+
+        universe: list[dict] = data[0].get("universe", [])
+        asset_ctxs: list[dict] = data[1]
+
+        pairs = [
+            (meta.get("name", ""), float(ctx.get("dayNtlVlm", 0) or 0))
+            for meta, ctx in zip(universe, asset_ctxs)
+            if meta.get("name", "") not in self._STABLECOINS
+        ]
+        pairs.sort(key=lambda x: x[1], reverse=True)
+        return [(coin, rank + 1, vol) for rank, (coin, vol) in enumerate(pairs[:top_n])]
 
     async def get_asset_contexts(self) -> list[dict]:
         """Fetch current OI and mark price for all coins (no cache)."""

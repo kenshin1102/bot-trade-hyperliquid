@@ -207,3 +207,77 @@ psql postgresql://bot:bot@localhost:15434/hl_strategy \
 1. `execution.mode: live` trong `config.yaml`
 2. `HL_PRIVATE_KEY` được set trong `.env`
 3. `LIVE_TRADING_CONFIRMED=I_UNDERSTAND` trong `.env`
+
+---
+
+## Backtest & Kết quả tốt nhất
+
+### Chạy backtest
+
+```bash
+# Backtest đơn lẻ
+.venv/bin/python -m src.backtest.runner --days 180 --timeframe 1h
+
+# Sweep nhiều params, walk-forward, slippage stress
+.venv/bin/python -m src.backtest.scenarios \
+  --names S07-1h-filter --htf match \
+  --grid-vol-z 2.2 --grid-tp-rr 2.5 \
+  --grid-ema-spread 1.2 \
+  --grid-min-vol 10e6 \
+  --rolling-universe 10 --days 180 --wf 3 --slippage 5 20 50 \
+  --coins BTC HYPE ETH SOL ZEC WLD NEAR XPL EIGEN AVAX XRP LIT JTO UNI XMR TAO AAVE MET AERO SUI VVV CRV PUMP ONDO ASTER ENA FARTCOIN XLM kPEPE BNB
+```
+
+Kết quả lưu tự động tại `data/sweep_<timestamp>.json`.
+
+### Scenario tốt nhất: `S07-1h-filter-z2.2-rr2.50-sp1.20-v10m` (cập nhật 2026-06-20)
+
+**Dataset:** 180 ngày (Dec 22 2025 → Jun 20 2026), rolling top-10 coins theo 24h volume từ pool-30, 4h HTF trend filter.
+
+| Metric | Giá trị |
+|---|---|
+| Trades | 200 |
+| Win Rate | **42.0%** |
+| PnL | +$2,045 (+20.4%) |
+| Profit Factor | **1.692** |
+| Max Drawdown | 3.1% |
+| Avg Win / Avg Loss | +$59.5 / -$25.5 |
+| Avg Hold | 12.4h |
+
+**Walk-forward 3 windows (mỗi ~59 ngày):**
+
+| Window | Trades | WR | PF | MaxDD |
+|---|---|---|---|---|
+| W1 Dec22→Feb20 | 72 | 43.1% | 1.766 | 1.4% |
+| W2 Feb20→Apr21 | 64 | 39.1% | 1.499 | 2.8% |
+| W3 Apr21→Jun20 | 64 | 43.8% | 1.817 | 2.0% |
+| **Tổng** | **200** | **42.0%** | **avg 1.694** | **3.1%** |
+
+3/3 windows profitable, worst_PF = 1.499.
+
+**Params (đã update vào `config.yaml`):**
+
+```yaml
+strategy:
+  timeframe: "1h"
+  breakout_lookback_candles: 30
+  volume_zscore_min: 2.2
+  ema_spread_min_pct: 1.2    # trending market filter
+  min_vol_24h_usd: 10000000  # thin-volume coin filter ($10M/day)
+
+risk:
+  tp_rr: 2.5
+  sl_atr_multiplier: 1.5
+  max_concurrent_positions: 2
+```
+
+**Filters đã thử nghiệm và kết quả:**
+
+| Filter | Tác động | Quyết định |
+|---|---|---|
+| EMA spread ≥ 1.2% | WR 37.8% → 42%, PF 1.35 → 1.69 | ✅ **Bật** |
+| Min 24h vol ≥ $10M | Loại thin-volume coins, PF nhẹ tăng, DD giảm | ✅ **Bật** |
+| ATR expansion ≥ 1.1× | WR giảm, PF giảm | ❌ Không dùng |
+| 2-bar confirmation | WR giảm 37% → 42%, WF kém hơn | ❌ Không dùng |
+
+**WR ceiling:** ~42% với signal structure hiện tại (1-candle breakout). Để đạt 50% cần thay đổi loại signal (mean-reversion, pullback entry).

@@ -19,6 +19,7 @@ class Features:
     ema_20: float
     ema_50: float
     atr: float
+    atr_mean: float
     volume_zscore: float
     oi_change_pct: float
     funding_rate: float
@@ -62,6 +63,7 @@ class FeatureEngine:
             ema_20 = _ema(closes[-20:], 20)
             ema_50 = _ema(closes[-50:], 50)
             atr = _atr(candles[-15:])  # 14 TRs need 15 candles
+            atr_mean = mean(c.high - c.low for c in candles[-30:]) if len(candles) >= 30 else atr
 
             last_20 = candles[-20:]
             vols = [c.volume for c in last_20]
@@ -112,6 +114,7 @@ class FeatureEngine:
             ema_20=ema_20,
             ema_50=ema_50,
             atr=atr,
+            atr_mean=atr_mean,
             volume_zscore=volume_zscore,
             oi_change_pct=oi_change_pct,
             funding_rate=funding_rate,

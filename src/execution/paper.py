@@ -184,11 +184,13 @@ class PaperEngine:
             coin, pos.side, fill_price, size_notional, pos.sl_price, pos.tp_price, fee_usd,
         )
         sl_pct = sl_distance_pct * 100
+        coin_size = size_notional / fill_price if fill_price else 0
+        notional_fmt = f"~${size_notional/1000:.0f}k" if size_notional >= 1000 else f"~${size_notional:.0f}"
         await self._notifier.send("info", (
             f"📄 PAPER OPEN\n\n"
             f"{coin} {signal.side}\n"
             f"Entry: ${fill_price:,.4f}\n"
-            f"Size: ${size_notional:,.0f} notional\n"
+            f"Size: {coin_size:.4g} {coin} ({notional_fmt})\n"
             f"SL: ${signal.sl_price:,.4f} ({sl_pct:.2f}%)\n"
             f"TP: ${signal.tp_price:,.4f}\n"
             f"Fee: ${fee_usd:.2f}\n"
@@ -321,9 +323,12 @@ class PaperEngine:
             "paper CLOSE %s %s reason=%s exit=%.4f pnl=%s$%.2f (%s%.1f%%)",
             coin, pos.side, reason, exit_price, sign, pnl, sign, pnl_pct,
         )
+        coin_size = pos.size_notional / pos.entry_price if pos.entry_price else 0
+        notional_fmt = f"~${pos.size_notional/1000:.0f}k" if pos.size_notional >= 1000 else f"~${pos.size_notional:.0f}"
         await self._notifier.send("info", (
             f"📄 PAPER CLOSE — {label}\n\n"
             f"{coin} {pos.side}\n"
+            f"Size: {coin_size:.4g} {coin} ({notional_fmt})\n"
             f"Entry: ${pos.entry_price:,.4f} → Exit: ${exit_price:,.4f}\n"
             f"PnL: {sign}${abs(pnl):.2f} ({sign}{pnl_pct:.1f}%)\n"
             f"Daily PnL: {'+' if self._realized_pnl_today >= 0 else ''}${self._realized_pnl_today:.2f}"

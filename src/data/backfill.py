@@ -18,8 +18,8 @@ from src.config.settings import load_config, load_secrets
 from src.data.coin_selector import CoinSelector
 from src.hyperliquid.client import HyperliquidClient
 from src.monitoring.notifier import TaggedNotifier, build_notifier
-from src.storage.db import AssetContextRow, CandleRow, FundingRateRow, init_db, make_session_factory
-from src.storage.repository import AssetContextRepo, CandleRepo, FundingRateRepo
+from src.storage.db import AssetContextRow, CandleRow, FundingRateRow, UniverseSnapshotRow, init_db, make_session_factory
+from src.storage.repository import AssetContextRepo, CandleRepo, FundingRateRepo, UniverseSnapshotRepo
 
 logger = logging.getLogger("data.backfill")
 
@@ -33,42 +33,61 @@ _MAX_CANDLES_PER_REQUEST = 5000
 
 async def backfill_candles(client: HyperliquidClient, repo: CandleRepo, coins: list[str], intervals: list[str], days: int) -> None:
     now = time.time()
+    full_start_ms = int((now - days * 86400) * 1000)
     for coin in coins:
         for interval in intervals:
             try:
-                start_ms = int((now - days * 86400) * 1000)
-                end_ms = int(now * 1000)
                 interval_min = _INTERVAL_MINUTES.get(interval, 60)
-                # Max window per API call to stay within ~5000 candle limit
-                chunk_ms = _MAX_CANDLES_PER_REQUEST * interval_min * 60 * 1000
+                interval_ms = interval_min * 60 * 1000
 
+                end_ms = int(now * 1000)
+                chunk_ms = _MAX_CANDLES_PER_REQUEST * interval_ms
                 all_rows: list[CandleRow] = []
-                chunk_start = start_ms
-                while chunk_start < end_ms:
-                    chunk_end = min(chunk_start + chunk_ms, end_ms)
-                    raw = await client.get_candles(coin, interval, chunk_start, chunk_end)
-                    if raw:
-                        all_rows.extend(
-                            CandleRow(
-                                id=f"{coin}:{interval}:{c['open_time']}",
-                                coin=coin,
-                                interval=interval,
-                                open_time=c["open_time"],
-                                close_time=c["close_time"],
-                                open=c["open"],
-                                high=c["high"],
-                                low=c["low"],
-                                close=c["close"],
-                                volume=c["volume"],
-                                created_at=int(now),
+
+                async def _fetch(range_start: int, range_end: int) -> None:
+                    cs = range_start
+                    while cs < range_end:
+                        ce = min(cs + chunk_ms, range_end)
+                        raw = await client.get_candles(coin, interval, cs, ce)
+                        if raw:
+                            all_rows.extend(
+                                CandleRow(
+                                    id=f"{coin}:{interval}:{c['open_time']}",
+                                    coin=coin, interval=interval,
+                                    open_time=c["open_time"], close_time=c["close_time"],
+                                    open=c["open"], high=c["high"], low=c["low"],
+                                    close=c["close"], volume=c["volume"],
+                                    created_at=int(now),
+                                )
+                                for c in raw
                             )
-                            for c in raw
-                        )
-                    chunk_start = chunk_end + 1
-                    await asyncio.sleep(0.3)
+                        cs = ce + 1
+                        await asyncio.sleep(0.3)
+
+                # Backward fill: fetch gap if existing data doesn't reach full_start_ms
+                oldest = repo.get_oldest(coin, interval, 1)
+                if oldest and oldest[0].open_time * 1000 > full_start_ms + interval_ms:
+                    gap_end = oldest[0].open_time * 1000 - interval_ms
+                    logger.info("backfill: %s %s backward gap → fetching to %s",
+                                coin, interval, gap_end // 1000)
+                    await _fetch(full_start_ms, gap_end)
+
+                # Forward fill: resume from latest stored candle
+                latest = repo.get_latest(coin, interval, 1)
+                if latest:
+                    start_ms = latest[0].open_time * 1000 + interval_ms
+                else:
+                    start_ms = full_start_ms
+
+                if start_ms >= end_ms:
+                    if not all_rows:
+                        logger.debug("backfill: %s %s up to date, skipping", coin, interval)
+                        continue
+                else:
+                    await _fetch(start_ms, end_ms)
 
                 repo.upsert_many(all_rows)
-                logger.info("backfill: %s %s → %d candles", coin, interval, len(all_rows))
+                logger.info("backfill: %s %s → %d candles upserted", coin, interval, len(all_rows))
             except Exception as exc:
                 logger.error("backfill: candles %s %s failed: %s", coin, interval, exc)
             await asyncio.sleep(0.3)
@@ -76,9 +95,11 @@ async def backfill_candles(client: HyperliquidClient, repo: CandleRepo, coins: l
 
 async def backfill_funding(client: HyperliquidClient, repo: FundingRateRepo, coins: list[str], days: int) -> None:
     now = time.time()
+    full_start_ms = int((now - days * 86400) * 1000)
     for coin in coins:
         try:
-            start_time_ms = int((now - days * 86400) * 1000)
+            latest = repo.get_latest(coin, 1)
+            start_time_ms = (latest[0].funding_time * 1000 + 1) if latest else full_start_ms
             raw = await client.get_funding_history(coin, start_time_ms)
             rows = [
                 FundingRateRow(
@@ -122,6 +143,27 @@ async def backfill_asset_contexts(client: HyperliquidClient, repo: AssetContextR
         logger.error("backfill: asset_contexts failed: %s", exc)
 
 
+async def save_universe_snapshot(client: HyperliquidClient, repo: UniverseSnapshotRepo, top_n: int = 30) -> None:
+    """Snapshot current top-N coins by 24h volume. Floored to the hour so reruns are idempotent."""
+    snapshot_time = int(time.time()) // 3600 * 3600
+    try:
+        ranked = await client.get_ranked_coins_by_volume(top_n)
+        rows = [
+            UniverseSnapshotRow(
+                id=f"{snapshot_time}:{coin}",
+                snapshot_time=snapshot_time,
+                coin=coin,
+                rank=rank,
+                volume_24h_usd=vol,
+            )
+            for coin, rank, vol in ranked
+        ]
+        repo.upsert_many(rows)
+        logger.info("backfill: universe snapshot → %d coins at t=%d", len(rows), snapshot_time)
+    except Exception as exc:
+        logger.error("backfill: universe snapshot failed: %s", exc)
+
+
 async def run_once(client: HyperliquidClient, session_factory, cfg, notifier) -> None:
     t0 = time.time()
     session = session_factory()
@@ -129,10 +171,11 @@ async def run_once(client: HyperliquidClient, session_factory, cfg, notifier) ->
         candle_repo = CandleRepo(session)
         funding_repo = FundingRateRepo(session)
         ctx_repo = AssetContextRepo(session)
+        universe_repo = UniverseSnapshotRepo(session)
 
         selector = CoinSelector(
             client, redis=None,
-            n=cfg.data.top_coins_n,
+            n=cfg.data.backfill_pool_n,
             refresh_days=cfg.data.top_coins_refresh_days,
             fallback=cfg.data.coins,
         )
@@ -144,6 +187,7 @@ async def run_once(client: HyperliquidClient, session_factory, cfg, notifier) ->
         await backfill_candles(client, candle_repo, coins, intervals, days)
         await backfill_funding(client, funding_repo, coins, days)
         await backfill_asset_contexts(client, ctx_repo, coins)
+        await save_universe_snapshot(client, universe_repo)
 
         elapsed = time.time() - t0
         logger.info("backfill: done in %.1fs", elapsed)

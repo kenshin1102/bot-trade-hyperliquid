@@ -80,6 +80,30 @@ class CandleCache:
 
 _HTF_EMA_FAST = 20
 _HTF_EMA_SLOW = 50
+_VOL_WINDOW_CANDLES = 24  # 24 × 1h = rolling 24h dollar volume
+
+
+def _rolling_vol_24h(coin: str, cache: CandleCache, ts: int) -> float:
+    """Sum of (close × volume) for the last 24 candles up to ts."""
+    ts_arr = cache.candle_ts.get(coin, [])
+    candles = cache.candles.get(coin, [])
+    if not ts_arr or not candles:
+        return 0.0
+    idx = bisect.bisect_right(ts_arr, ts) - 1
+    if idx < 0:
+        return 0.0
+    start = max(0, idx - _VOL_WINDOW_CANDLES + 1)
+    return sum(c.close * c.volume for c in candles[start:idx + 1])
+
+
+def _top_coins_by_vol(coins: list[str], cache: CandleCache, ts: int, n: int) -> list[str]:
+    """Return top-n coins ranked by rolling 24h dollar volume at ts."""
+    ranked = sorted(
+        coins,
+        key=lambda c: _rolling_vol_24h(c, cache, ts),
+        reverse=True,
+    )
+    return ranked[:n]
 
 
 def _htf_trend_ok(
@@ -132,6 +156,7 @@ def _compute_features(
     ema_20 = _ema(closes[-20:], 20)
     ema_50 = _ema(closes[-50:], 50)
     atr = _atr(candles[-15:])
+    atr_mean = mean(c.high - c.low for c in candles[-30:])
 
     vols = [c.volume for c in candles[-20:]]
     mean_v = mean(vols[:-1])
@@ -152,6 +177,7 @@ def _compute_features(
         ema_20=ema_20,
         ema_50=ema_50,
         atr=atr,
+        atr_mean=atr_mean,
         volume_zscore=volume_zscore,
         oi_change_pct=0.0,   # no historical OI data
         funding_rate=funding_rate,
@@ -243,6 +269,12 @@ def run(
     cache: CandleCache | None = None,
     htf_caches: dict[str, CandleCache] | None = None,
     htf_filter: list[str] | None = None,
+    since_ts: int | None = None,
+    until_ts: int | None = None,
+    slippage_bps: float | None = None,
+    coin_earliest: dict[str, int] | None = None,
+    rolling_universe_n: int | None = None,
+    vol_cache: CandleCache | None = None,
 ) -> BtResult:
     if cache is None:
         cache = load_candle_cache(session_factory, coins, timeframe, days)
@@ -281,6 +313,12 @@ def run(
     for i in range(_MIN_CANDLES, len(btc_candles)):
         btc_c = btc_candles[i]
         ts = btc_c.close_time
+
+        # Walk-forward window filter
+        if since_ts is not None and ts < since_ts:
+            continue
+        if until_ts is not None and ts > until_ts:
+            break
 
         # Reset daily PnL counter at midnight UTC
         day_bucket = ts // 86400
@@ -324,11 +362,30 @@ def run(
         if daily_pnl < -max_daily_loss:
             continue
 
+        # Rolling universe: only trade top-N coins by 24h vol at this timestamp
+        if rolling_universe_n is not None:
+            _vc = vol_cache if vol_cache is not None else cache
+            eligible: set[str] | None = set(_top_coins_by_vol(coins, _vc, ts, rolling_universe_n))
+        else:
+            eligible = None
+
         for coin in coins:
             if coin in open_pos:
                 continue
             if len(open_pos) >= cfg.risk.max_concurrent_positions:
                 break
+            # Delayed inclusion: skip coin until its earliest allowed timestamp
+            if coin_earliest and ts < coin_earliest.get(coin, 0):
+                continue
+            # Rolling universe gate
+            if eligible is not None and coin not in eligible:
+                continue
+
+            # Min 24h dollar volume gate
+            if cfg.strategy.min_vol_24h_usd > 0:
+                _vc = vol_cache if vol_cache is not None else cache
+                if _rolling_vol_24h(coin, _vc, ts) < cfg.strategy.min_vol_24h_usd:
+                    continue
 
             end = bisect.bisect_right(candle_ts.get(coin, []), ts)
             if end < _MIN_CANDLES:
@@ -364,7 +421,8 @@ def run(
             if _htf_filter and not _htf_trend_ok(signal.side, coin, ts, _htf_caches, _htf_filter):
                 continue
 
-            adj = (cfg.execution.slippage_bps + cfg.execution.fee_taker_bps) / 10000
+            _slip = slippage_bps if slippage_bps is not None else cfg.execution.slippage_bps
+            adj = (_slip + cfg.execution.fee_taker_bps) / 10000
             fill = current_price * (1 + adj) if signal.side == "LONG" else current_price * (1 - adj)
 
             sl_dist = abs(fill - signal.sl_price) / fill

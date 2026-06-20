@@ -4,6 +4,7 @@ data:
   backfill_days: 180
   top_coins_n: 10
   top_coins_refresh_days: 7
+  backfill_pool_n: 30
 
 regime:
   no_trade_below: 30.0     # score < 30 → NO_TRADE
@@ -16,19 +17,23 @@ regime:
 
 strategy:
   name: Breakout_V1
-  timeframe: "15m"
-  breakout_lookback_candles: 20
-  volume_zscore_min: 1.5
+  timeframe: "1h"
+  breakout_lookback_candles: 30
+  volume_zscore_min: 2.2
   oi_change_min_pct: 0.02     # OI must grow ≥ 2% to confirm breakout
   funding_max_pct: 0.005      # skip long if funding > 0.5% (overheated)
   spread_max_bps: 20.0
+  ema_spread_min_pct: 1.2    # EMA20/EMA50 spread ≥ 1.2% → only trade in trending market
+  atr_expansion_min: 0.0     # 0 = disabled
+  min_vol_24h_usd: 10000000  # skip signal if coin 24h vol < $10M
+  breakout_confirm_bars: 1   # 1 = enter on breakout bar; 2 = require next bar confirms
 
 risk:
   max_risk_per_trade_pct: 0.25   # risk 0.25% of account per trade
   sl_atr_multiplier: 1.5
-  tp_rr: 2.0                     # TP = 2× SL distance
+  tp_rr: 2.5                     # TP = 2.5× SL distance
   max_daily_loss_pct: 1.0        # pause new trades if down >1% today
-  max_concurrent_positions: 3
+  max_concurrent_positions: 2
   emergency_stop: false
 
 execution:

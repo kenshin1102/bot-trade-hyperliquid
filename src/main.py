@@ -89,12 +89,11 @@ async def run(report_hours: float = 24.0) -> None:
     # Price callback → paper engine SL/TP check
     ws.set_price_callback(paper.on_price_update)
 
-    # Candle callback → save to DB → evaluate strategy
-    async def on_candle(coin: str, interval: str, candle: dict) -> None:
-        if not candle.get("is_closed", False):
-            return  # only process closed candles
+    # HL WS does not send "x" (candle-closed flag). We detect closure via
+    # open_time transition: when a new period starts, the previous is closed.
+    _live_candles: dict[tuple, dict] = {}  # (coin, interval) -> latest live candle
 
-        # Persist closed candle so feature engine always has fresh data
+    async def _save_candle(coin: str, interval: str, candle: dict) -> None:
         open_time_s = candle["open_time"]
         s = sf()
         try:
@@ -116,31 +115,43 @@ async def run(report_hours: float = 24.0) -> None:
         finally:
             s.close()
 
+    async def on_candle(coin: str, interval: str, candle: dict) -> None:
+        key = (coin, interval)
+        prev = _live_candles.get(key)
+        _live_candles[key] = candle
+
+        # Candle is closed when a new period starts (open_time transitions)
+        if prev is None or candle["open_time"] == prev["open_time"]:
+            return  # same period still in progress
+
+        # prev is the just-closed candle — persist it
+        await _save_candle(coin, interval, prev)
+        logger.info("candle closed: %s %s o=%.4f c=%.4f", coin, interval, prev["open"], prev["close"])
+
         if interval != cfg.strategy.timeframe:
-            return  # saved to DB but don't evaluate on 1h candles
+            return
 
         features = feature_engine.compute(coin, interval)
         if features is None:
+            logger.debug("features=None for %s %s — skip", coin, interval)
             return
 
         btc_features = feature_engine.compute("BTC", interval) if coin != "BTC" else None
 
-        # Get recent candles from DB for range calculation
         s = sf()
         try:
-            candles = CandleRepo(s).get_latest(coin, interval, cfg.strategy.breakout_lookback_candles + 2)
-            candles = list(reversed(candles))  # ascending
+            recent = CandleRepo(s).get_latest(coin, interval, cfg.strategy.breakout_lookback_candles + 2)
+            recent = list(reversed(recent))
         finally:
             s.close()
 
         current_price = paper._prices.get(coin)
         if current_price is None:
+            logger.debug("no price yet for %s — skip", coin)
             return
 
-        # Estimate spread from price (very rough; replace with orderbook data later)
         spread_bps = 5.0
-
-        signal = strategy.evaluate(coin, features, btc_features, candles, current_price, spread_bps)
+        signal = strategy.evaluate(coin, features, btc_features, recent, current_price, spread_bps)
         if signal is None:
             return
 
